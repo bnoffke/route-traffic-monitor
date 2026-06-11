@@ -1,0 +1,38 @@
+defaults:
+  travel_mode: DRIVE
+  routing_preference: TRAFFIC_AWARE
+  compute_alternative_routes: true
+  language_code: en-US
+  units: METRIC
+
+places:
+  midvale_university: "ChIJ9SQxBmqsB4gRin_8BRxiRPY"   # 3750 University Ave
+  midvale_south_sb:   "ChIJT_d_lEusB4gRkBacI9TBLM8"   # 402 S Midvale Blvd (SB destination)
+  midvale_south_nb:   "ChIJi8sDi0usB4gRXMKHmDSe43c"   # 401 S Midvale Blvd (NB origin)
+
+routes:
+  - name: midvale_sb
+    corridor: "Midvale Blvd"
+    direction: SB
+    origin: midvale_university
+    destination: midvale_south_sb
+
+  - name: midvale_nb
+    corridor: "Midvale Blvd"
+    direction: NB
+    origin: midvale_south_nb
+    destination: midvale_university
+
+timezone: America/Chicago
+
+schedules:
+  - name: am-peak
+    cron: "*/10 6-9 * * 1-5"
+  - name: pm-peak
+    cron: "*/10 15-18 * * 1-5"
+  - name: midday-baseline
+    cron: "0 12 * * 1-5"
+  - name: pm-shoulder
+    cron: "0 19 * * 1-5"
+  - name: weekend-baseline
+    cron: "0 12,17 * * 6,0"

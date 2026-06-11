@@ -216,3 +216,23 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Terraform
+# Provider/module cache — large, machine-specific.
+**/.terraform/*
+# Local state — sensitive, machine-specific. Use the GCS backend in production.
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+# tfvars often hold secrets; commit *.tfvars.example instead if you add one.
+*.tfvars
+*.tfvars.json
+# CLI config and local overrides.
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+# NOTE: .terraform.lock.hcl is intentionally NOT ignored — commit it (provider lockfile).
