@@ -1,0 +1,23 @@
+# .gcloudignore — controls what `gcloud run jobs deploy --source .` uploads to Cloud Build.
+# When this file exists, gcloud uses it INSTEAD of falling back to .gitignore.
+#
+# Strategy: allowlist. Ignore everything at the repo root, then re-include only the
+# files Buildpacks needs to build the container. This guarantees secrets (.env),
+# Terraform state, and local caches can never leak into the build context — including
+# files added to the repo later.
+#
+# If you add a new build input (e.g. another package dir), re-include it below.
+
+# Ignore everything at the top level...
+/*
+
+# ...except the inputs the Python (uv) buildpack needs:
+!/src
+!/config
+!/pyproject.toml
+!/uv.lock
+!/Procfile
+
+# Strip Python caches that may live inside the re-included dirs:
+src/**/__pycache__/
+config/**/__pycache__/
