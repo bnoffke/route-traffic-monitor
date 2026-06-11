@@ -9,7 +9,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from .config import AppConfig, Defaults, RouteEntry
+from .config import Defaults, Place, RouteEntry
 
 ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
 FIELD_MASK = (
@@ -52,16 +52,23 @@ def _parse_duration(value: str) -> int:
     return int(value.rstrip("s"))
 
 
+def _waypoint(place: Place) -> dict:
+    location: dict = {"latLng": {"latitude": place.lat, "longitude": place.lng}}
+    if place.heading is not None:
+        location["heading"] = place.heading
+    return {"location": location}
+
+
 def poll_route(
     route: RouteEntry,
-    places: dict[str, str],
+    places: dict[str, Place],
     defaults: Defaults,
     api_key: str,
     request_time: datetime,
 ) -> list[dict]:
     body: dict = {
-        "origin": {"placeId": places[route.origin]},
-        "destination": {"placeId": places[route.destination]},
+        "origin": _waypoint(places[route.origin]),
+        "destination": _waypoint(places[route.destination]),
         "travelMode": defaults.travel_mode,
         "routingPreference": defaults.routing_preference,
         "computeAlternativeRoutes": defaults.compute_alternative_routes,
@@ -69,7 +76,7 @@ def poll_route(
         "units": defaults.units,
     }
     if route.intermediate is not None:
-        body["intermediates"] = [{"placeId": places[route.intermediate]}]
+        body["intermediates"] = [_waypoint(places[route.intermediate])]
 
     with httpx.Client(timeout=30) as client:
         data = _post(client, api_key, body)
@@ -91,5 +98,15 @@ def poll_route(
             "encoded_polyline": api_route.get("polyline", {}).get("encodedPolyline", ""),
             "request_time_utc": request_time,
         })
+
+    if route.expected_distance_m and records:
+        exp = route.expected_distance_m
+        primary = records[0]["distance_meters"]
+        if abs(primary - exp) / exp > 0.25:
+            log.warning(
+                "Route %s primary distance %dm deviates >25%% from expected %dm "
+                "(possible wrong-carriageway snap)",
+                route.name, primary, exp,
+            )
 
     return records

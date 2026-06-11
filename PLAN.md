@@ -3,7 +3,6 @@
 **Status:** Design approved for implementation
 **Owner:** Ben
 **Purpose of this document:** Hand-off spec for developer agents to produce a working solution. It specifies service choices, configuration schema, output contract, IAM, and a deployment runbook. Where a decision was a judgment call, the tradeoff is recorded so implementers don't relitigate it.
-**GCP Project ID:** madison-municipal-data
 
 ---
 
@@ -11,7 +10,7 @@
 
 Poll the Google Routes API (`computeRoutes`) for a fixed set of Madison street segments on a schedule concentrated around peak commute hours, and land the raw responses as Parquet in the bronze GCS bucket for downstream dbt/DuckDB consumption.
 
-This replaces a prior R + GitHub Actions implementation (attached reference: `get_route()` script). The reference script defines the request shape, field mask, and the route/place-ID inventory; this design ports it to Python on GCP-native scheduling and compute. The bronze layer should capture what the API returned plus run metadata — *no* derived columns (delay, day-of-week, etc.). Those belong in dbt/silver.
+This replaces a prior R + GitHub Actions implementation (attached reference: `get_route()` script). The reference script defines the request shape, field mask, and the route inventory; this design ports it to Python on GCP-native scheduling and compute. One deliberate departure: waypoints are specified as lat/lng coordinates (`location.latLng`, optional `heading`) rather than the reference script’s place IDs — coordinates are stable over time, easier to author, and support directional headings. The bronze layer should capture what the API returned plus run metadata — *no* derived columns (delay, day-of-week, etc.). Those belong in dbt/silver.
 
 ## 2. High-level architecture
 
@@ -64,12 +63,14 @@ defaults:
   language_code: en-US
   units: METRIC
 
-# Named places, Google Place ID format.
-# Obtain interactively: https://developers.google.com/maps/documentation/places/web-service/place-id
+# Named places as coordinates (right-click -> copy coordinates in Google Maps).
+# `heading` (0-360, degrees clockwise from north = intended direction of travel)
+# is OPTIONAL but REQUIRED on divided roads (e.g., E Wash) to prevent the router
+# snapping the point to the opposite carriageway.
 places:
-  JND_Rimrock_inbound: "Eik2OTggSm9obiBOb2xlbiBEciw..."   # full IDs ported from R script
-  Hairball_inbound:    "EigxMSBKb2huIE5vbGVuIERyLC..."
-  # ... (all ~30 place IDs from the reference R script)
+  JND_Rimrock_inbound: { lat: 43.0411, lng: -89.3786 }              # illustrative coords
+  Hairball_inbound:    { lat: 43.0660, lng: -89.3812, heading: 350 }
+  # ... maintainer supplies coordinates for the v1 routes
 
 # Route segments to poll. `intermediate` is optional.
 routes:
@@ -95,6 +96,8 @@ schedules:
     cron: "*/10 6-9 * * 1-5"      # every 10 min, 6:00–9:50, weekdays (cheap at 2 routes; see §9)
   - name: pm-peak
     cron: "*/10 15-18 * * 1-5"    # every 10 min, 15:00–18:50, weekdays
+  - name: pm-shoulder
+    cron: "0 19 * * 1-5"          # single 7:00 PM sample; continuity with predecessor dataset's shoulder observation
   - name: midday-baseline
     cron: "0 12 * * 1-5"          # free-flow-ish comparison point
   - name: weekend-baseline
@@ -121,9 +124,14 @@ Body (per route):
 
 ```json
 {
-  "origin":      {"placeId": "<places[route.origin]>"},
-  "destination": {"placeId": "<places[route.destination]>"},
-  "intermediates": [{"placeId": "<places[route.intermediate]>"}],   // omit key entirely if not set
+  "origin": {
+    "location": {
+      "latLng": {"latitude": <places[route.origin].lat>, "longitude": <places[route.origin].lng>},
+      "heading": <places[route.origin].heading>            // include only if set in config
+    }
+  },
+  "destination":   { "location": { "latLng": {...} } },     // same shape
+  "intermediates": [{ "location": { "latLng": {...} } }],   // omit key entirely if route has no intermediate
   "travelMode": "DRIVE",
   "routingPreference": "TRAFFIC_AWARE",
   "computeAlternativeRoutes": true,
@@ -136,6 +144,7 @@ Implementation notes:
 
 - Keep the field mask **exactly** this lean. The field mask affects which SKU bills (e.g., requesting `routes.travelAdvisory.tollInfo` escalates the SKU). Do not add fields casually.
 - One response may contain multiple routes (`computeAlternativeRoutes: true`); emit one output row per returned route, same as the R script.
+- **Coordinate snapping caveat:** bare lat/lng points snap to the nearest road edge; on divided roads this can silently select the wrong carriageway (measuring the opposite direction, often with a U-turn added). Defenses: coordinates placed on the correct carriageway, `heading` set on divided-road waypoints, and `sideOfRoad: true` on the Waypoint if needed. A wrong-carriageway snap typically manifests as anomalous `distanceMeters`; log a WARN if a route's primary-alternative distance deviates >25% from a per-route `expected_distance_m` value in config (optional field, recommended).
 - Use `httpx` (or `requests`) with a 30s timeout and 2–3 retries with backoff on 5xx/429 per route. A route that still fails is logged at ERROR with the route name and **skipped** — one bad place ID must not sink the whole run. If *all* routes fail, exit nonzero so the Job execution is marked failed.
 - The ~16 requests can be made sequentially; total runtime is a few seconds. Concurrency is unnecessary complexity here.
 
@@ -255,9 +264,8 @@ Explicitly **not** pre-created: service accounts, the secret container, schedule
 
 | concern | tool | why |
 |---|---|---|
-| API enablement, service accounts, IAM bindings (GCS + secret), secret *container*, Cloud Scheduler jobs | Terraform (`infra/`) | declarative, reviewable, reproducible |
+| API enablement, service accounts, IAM bindings, secret *container*, Cloud Scheduler jobs | Terraform (`infra/`) | declarative, reviewable, reproducible |
 | Cloud Run Job container (code + config) | `gcloud run jobs deploy --source` | source deploys are a gcloud/Buildpacks feature; Terraform would require managing an image URI and a build pipeline, fighting the ease-of-deployment priority |
-| `run.invoker` binding on the job (scheduler SA) | `gcloud run jobs add-iam-policy-binding` (in `deploy.sh`) | the binding targets the gcloud-created job; a TF binding 404s on first apply because the job doesn't exist yet. Keeping it with the job lets `terraform apply` run clean in one pass |
 | Secret *value* | `gcloud secrets versions add` (once, manual) | Terraform state stores secret versions in plaintext; keep the key out of state |
 
 **Schedules: Terraform reads routes.yaml directly** — this replaces any sync script and keeps the YAML as the single source of truth:
@@ -283,7 +291,7 @@ resource "google_cloud_scheduler_job" "poll" {
 }
 ```
 
-**Invoker binding — job-scoped, granted by gcloud:** the `run.invoker` binding must be job-scoped (a project-level grant would let the scheduler SA invoke every current *and future* service/job in this general-purpose project, widening silently as it grows). But a job-scoped binding targets the gcloud-created job, so putting it in Terraform 404s on first apply (job doesn't exist yet) and forces a two-phase `apply → deploy → apply` bootstrap. **Decision: grant it with `gcloud run jobs add-iam-policy-binding` in `deploy.sh`, right after the job is created.** The binding is idempotent (re-run safe on every deploy) and lives with the gcloud-owned job, so no Terraform resource references the job and `terraform apply` runs clean in a single pass.
+**Ordering note:** the `run.invoker` IAM binding on the job (`google_cloud_run_v2_job_iam_member`) requires the job to exist, and the job is created by gcloud. **Decision: use the job-scoped binding.** This project is general-purpose and will accumulate other Cloud Run resources; a project-level `roles/run.invoker` grant would let this scheduler SA invoke every current *and future* service/job in the project, a standing grant that widens silently as the project grows. The job-scoped binding's only cost is a one-time bootstrap ordering: first `terraform apply` errors on that single resource (job doesn't exist yet) → `gcloud run jobs deploy` → `terraform apply` again, clean from then on. (Equivalent: `-target` everything except the binding on the first apply.)
 
 **Runbook:**
 
@@ -291,13 +299,17 @@ resource "google_cloud_scheduler_job" "poll" {
 PROJECT=...; REGION=us-central1
 
 # one-time bootstrap
-cd infra && terraform init && terraform apply        # services, SAs, IAM, secret, schedulers (clean, one pass)
+cd infra && terraform init && terraform apply        # services, SAs, IAM, secret, schedulers
 printf '%s' "$ROUTES_API_KEY" | gcloud secrets versions add routes-api-key --data-file=-
-bash scripts/deploy.sh $PROJECT                       # creates the job + grants the invoker binding
 
 # every code or config change — this is the whole story
-bash scripts/deploy.sh $PROJECT
-# deploy.sh runs: gcloud run jobs deploy --source . (+ add-iam-policy-binding for run.invoker)
+gcloud run jobs deploy route-traffic \
+  --source . --region $REGION \
+  --service-account route-traffic-runner@$PROJECT.iam.gserviceaccount.com \
+  --set-secrets ROUTES_API_KEY=routes-api-key:latest \
+  --set-env-vars BUCKET=stmsn-bronze,PREFIX=route-traffic/madison \
+  --max-retries 1 --task-timeout 5m
+# (wrapped by scripts/deploy.sh)
 
 # schedule changes in routes.yaml
 cd infra && terraform apply

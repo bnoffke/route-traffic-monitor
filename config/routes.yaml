@@ -5,23 +5,30 @@ defaults:
   language_code: en-US
   units: METRIC
 
+# Waypoints as coordinates on the correct carriageway (Google Maps: right-click -> copy
+# coordinates). Aligned rectangle: north ends share lat, south ends share lat; each
+# carriageway sits at a single lng. `heading` (0-360, optional) can be added if a divided
+# road mis-snaps. Midvale runs N-S; SB = west carriageway, NB = east.
 places:
-  midvale_university: "ChIJ9SQxBmqsB4gRin_8BRxiRPY"   # 3750 University Ave
-  midvale_south_sb:   "ChIJT_d_lEusB4gRkBacI9TBLM8"   # 402 S Midvale Blvd (SB destination)
-  midvale_south_nb:   "ChIJi8sDi0usB4gRXMKHmDSe43c"   # 401 S Midvale Blvd (NB origin)
+  midvale_university_sb: { lat: 43.074269, lng: -89.451251 }   # north, SB (west) carriageway
+  midvale_south_sb:      { lat: 43.059454, lng: -89.451251 }   # south, SB (west) carriageway
+  midvale_south_nb:      { lat: 43.059454, lng: -89.451056 }   # south, NB (east) carriageway
+  midvale_university_nb: { lat: 43.074269, lng: -89.451056 }   # north, NB (east) carriageway
 
 routes:
   - name: midvale_sb
     corridor: "Midvale Blvd"
     direction: SB
-    origin: midvale_university
+    origin: midvale_university_sb
     destination: midvale_south_sb
+    expected_distance_m: 1645   # WARN if primary route deviates >25%
 
   - name: midvale_nb
     corridor: "Midvale Blvd"
     direction: NB
     origin: midvale_south_nb
-    destination: midvale_university
+    destination: midvale_university_nb
+    expected_distance_m: 1647
 
 timezone: America/Chicago
 

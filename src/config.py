@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class Defaults(BaseModel):
@@ -13,6 +13,12 @@ class Defaults(BaseModel):
     units: str = "METRIC"
 
 
+class Place(BaseModel):
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
+    heading: int | None = Field(default=None, ge=0, le=360)
+
+
 class RouteEntry(BaseModel):
     name: str
     corridor: str
@@ -20,6 +26,7 @@ class RouteEntry(BaseModel):
     origin: str
     destination: str
     intermediate: str | None = None
+    expected_distance_m: int | None = None
 
 
 class Schedule(BaseModel):
@@ -29,7 +36,7 @@ class Schedule(BaseModel):
 
 class AppConfig(BaseModel):
     defaults: Defaults
-    places: dict[str, str]
+    places: dict[str, Place]
     routes: list[RouteEntry]
     schedules: list[Schedule]
     timezone: str

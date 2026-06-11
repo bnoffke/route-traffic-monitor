@@ -1,4 +1,6 @@
 import io
+import json
+import logging
 import textwrap
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -8,8 +10,8 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from src.config import AppConfig, load_config
-from src.routes_client import _parse_duration, poll_route
+from src.config import AppConfig, Place, load_config
+from src.routes_client import _parse_duration, _waypoint, poll_route
 from src.sink import PA_SCHEMA, write_parquet
 
 VALID_YAML = textwrap.dedent("""\
@@ -20,8 +22,8 @@ VALID_YAML = textwrap.dedent("""\
       language_code: en-US
       units: METRIC
     places:
-      place_a: "ChIJaaa"
-      place_b: "ChIJbbb"
+      place_a: { lat: 43.07, lng: -89.45 }
+      place_b: { lat: 43.06, lng: -89.45 }
     routes:
       - name: route_ab
         corridor: "Test Corridor"
@@ -125,6 +127,79 @@ def test_poll_route_returns_two_records(httpx_mock):
     assert records[0]["corridor"] == "Test Corridor"
     assert records[0]["direction"] == "NB"
     assert records[0]["request_time_utc"] == run_ts
+
+
+# --- Waypoint body shape (lat/lng) ---
+
+def test_waypoint_body_shape(httpx_mock):
+    httpx_mock.add_response(json=API_RESPONSE)
+
+    config = AppConfig.model_validate(yaml.safe_load(VALID_YAML))
+    run_ts = datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc)
+
+    poll_route(
+        config.routes[0],
+        config.places,
+        config.defaults,
+        api_key="test-key",
+        request_time=run_ts,
+    )
+
+    body = json.loads(httpx_mock.get_requests()[0].content)
+    assert body["origin"] == {
+        "location": {"latLng": {"latitude": 43.07, "longitude": -89.45}}
+    }
+    assert body["destination"] == {
+        "location": {"latLng": {"latitude": 43.06, "longitude": -89.45}}
+    }
+    # heading absent when not configured
+    assert "heading" not in body["origin"]["location"]
+    # no placeId anywhere
+    assert "placeId" not in body["origin"]
+
+
+def test_waypoint_includes_heading():
+    wp = _waypoint(Place(lat=43.07, lng=-89.45, heading=350))
+    assert wp == {
+        "location": {
+            "latLng": {"latitude": 43.07, "longitude": -89.45},
+            "heading": 350,
+        }
+    }
+
+
+# --- expected_distance_m deviation WARN ---
+
+def _config_with_expected(expected_m):
+    data = yaml.safe_load(VALID_YAML)
+    data["routes"][0]["expected_distance_m"] = expected_m
+    return AppConfig.model_validate(data)
+
+
+def test_expected_distance_warns(httpx_mock, caplog):
+    httpx_mock.add_response(json=API_RESPONSE)
+    # primary distance is 3200m; expect 1000m -> 220% deviation -> WARN
+    config = _config_with_expected(1000)
+    run_ts = datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc)
+
+    with caplog.at_level(logging.WARNING):
+        poll_route(config.routes[0], config.places, config.defaults,
+                   api_key="test-key", request_time=run_ts)
+
+    assert any("deviates >25%" in r.message for r in caplog.records)
+
+
+def test_expected_distance_within_threshold(httpx_mock, caplog):
+    httpx_mock.add_response(json=API_RESPONSE)
+    # primary distance is 3200m; expect 3100m -> ~3% deviation -> no WARN
+    config = _config_with_expected(3100)
+    run_ts = datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc)
+
+    with caplog.at_level(logging.WARNING):
+        poll_route(config.routes[0], config.places, config.defaults,
+                   api_key="test-key", request_time=run_ts)
+
+    assert not any("deviates" in r.message for r in caplog.records)
 
 
 # --- Parquet round-trip ---
