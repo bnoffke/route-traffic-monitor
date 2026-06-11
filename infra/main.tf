@@ -90,24 +90,12 @@ resource "google_cloud_scheduler_job" "poll" {
   time_zone = local.cfg.timezone
   region    = var.region
 
+  # Plain :run (no overrides body). An overrides body would require the extra
+  # run.jobs.runWithOverrides permission; we keep the SA on plain roles/run.invoker
+  # and derive the schedule label downstream from the run's local time-of-day.
   http_target {
     http_method = "POST"
     uri         = "https://run.googleapis.com/v2/projects/${var.project}/locations/${var.region}/jobs/route-traffic:run"
-
-    body = base64encode(jsonencode({
-      overrides = {
-        containerOverrides = [{
-          env = [{
-            name  = "SCHEDULE_NAME"
-            value = each.key
-          }]
-        }]
-      }
-    }))
-
-    headers = {
-      "Content-Type" = "application/json"
-    }
 
     oauth_token {
       service_account_email = google_service_account.scheduler.email
