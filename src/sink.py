@@ -1,5 +1,6 @@
 import io
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -29,8 +30,11 @@ def write_parquet(
     bucket_name: str,
     prefix: str,
     run_ts: datetime,
+    tz: str,
 ) -> str:
-    dt_str = run_ts.strftime("%Y-%m-%d")
+    # dt= is the local calendar date so evening runs stay with their day;
+    # run_ts in the filename remains UTC.
+    dt_str = run_ts.astimezone(ZoneInfo(tz)).strftime("%Y-%m-%d")
     run_ts_str = run_ts.strftime("%Y-%m-%dT%H%MZ")
     object_key = f"{prefix}/dt={dt_str}/run_ts={run_ts_str}.parquet"
 

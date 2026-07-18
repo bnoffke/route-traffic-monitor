@@ -43,7 +43,7 @@ def main() -> None:
         log.error("All routes failed — exiting nonzero")
         sys.exit(1)
 
-    gcs_path = write_parquet(records, bucket, prefix, run_ts)
+    gcs_path = write_parquet(records, bucket, prefix, run_ts, config.timezone)
     log.info("Wrote %d rows to %s", len(records), gcs_path)
 
 

@@ -242,8 +242,24 @@ def test_parquet_schema_and_rowcount(tmp_path):
     mock_client.bucket.return_value = mock_bucket
 
     with patch("src.sink.storage.Client", return_value=mock_client):
-        write_parquet(records, bucket_name, prefix, run_ts)
+        write_parquet(records, bucket_name, prefix, run_ts, "America/Chicago")
 
     table = pq.read_table(io.BytesIO(captured["data"]))
     assert table.num_rows == 1
     assert table.schema.equals(PA_SCHEMA)
+
+
+def test_write_parquet_dt_partition_uses_local_date():
+    def object_key_for(run_ts):
+        mock_bucket = MagicMock()
+        mock_client = MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+        with patch("src.sink.storage.Client", return_value=mock_client):
+            write_parquet([], "test-bucket", "p", run_ts, "America/Chicago")
+        return mock_bucket.blob.call_args[0][0]
+
+    evening = datetime(2026, 7, 18, 0, 1, tzinfo=timezone.utc)
+    assert object_key_for(evening) == "p/dt=2026-07-17/run_ts=2026-07-18T0001Z.parquet"
+
+    midday = datetime(2026, 7, 18, 17, 2, tzinfo=timezone.utc)
+    assert object_key_for(midday) == "p/dt=2026-07-18/run_ts=2026-07-18T1702Z.parquet"
