@@ -34,6 +34,7 @@ VALID_YAML = textwrap.dedent("""\
       - name: am-peak
         cron: "*/10 6-9 * * 1-5"
     timezone: America/Chicago
+    poll_window_cron: "*/10 6-9,12,15-19 * * *"
 """)
 
 API_RESPONSE = {

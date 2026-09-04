@@ -9,6 +9,7 @@ dependencies = [
     "pyarrow>=16.0",
     "google-cloud-storage>=2.16",
     "tenacity>=8.3",
+    "croniter>=2.0",
 ]
 
 [project.optional-dependencies]

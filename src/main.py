@@ -3,9 +3,11 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .config import load_config
 from .routes_client import poll_route
+from .schedule import active_schedule
 from .sink import write_parquet
 
 logging.basicConfig(
@@ -20,9 +22,27 @@ def main() -> None:
     api_key = os.environ["ROUTES_API_KEY"]
     bucket = os.environ.get("BUCKET", "stmsn-bronze")
     prefix = os.environ.get("PREFIX", "route-traffic/madison")
-    schedule_name = os.environ.get("SCHEDULE_NAME")
     run_id = os.environ.get("CLOUD_RUN_EXECUTION", "local")
     run_ts = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+
+    # A single Cloud Scheduler job fires on config.poll_window_cron, a superset of the real
+    # slots (one cron cannot express the weekday/weekend union). Runs that land outside a
+    # real slot exit here, before any Routes API call. An explicit SCHEDULE_NAME bypasses the
+    # gate so manual `gcloud run jobs execute` still works off-slot.
+    schedule_name = os.environ.get("SCHEDULE_NAME")
+    if not schedule_name:
+        local_now = run_ts.astimezone(ZoneInfo(config.timezone))
+        matched = active_schedule(config.schedules, local_now)
+        if matched is None:
+            log.info(
+                "No schedule active at %s %s — skipping run",
+                local_now.strftime("%Y-%m-%d %H:%M"),
+                config.timezone,
+            )
+            return
+        schedule_name = matched.name
+
+    log.info("Running schedule '%s'", schedule_name)
 
     records: list[dict] = []
     failures = 0

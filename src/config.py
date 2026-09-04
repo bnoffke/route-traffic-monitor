@@ -1,8 +1,15 @@
 import re
+from datetime import datetime
 from pathlib import Path
 
 import yaml
+from croniter import croniter
 from pydantic import BaseModel, Field, model_validator
+
+# Arbitrary fixed week used to prove `poll_window_cron` covers every schedule.
+# Starts on a Monday so all seven day-of-week values are exercised.
+_COVERAGE_WEEK_START = datetime(2024, 1, 1)
+_COVERAGE_WEEK_END = datetime(2024, 1, 8)
 
 
 class Defaults(BaseModel):
@@ -40,11 +47,37 @@ class AppConfig(BaseModel):
     routes: list[RouteEntry]
     schedules: list[Schedule]
     timezone: str
+    poll_window_cron: str
 
     @model_validator(mode="after")
     def _validate(self) -> "AppConfig":
         name_pattern = re.compile(r"^[a-z0-9_]+$")
         seen_names: set[str] = set()
+
+        if not croniter.is_valid(self.poll_window_cron):
+            raise ValueError(
+                f"poll_window_cron '{self.poll_window_cron}' is not a valid cron expression"
+            )
+
+        for schedule in self.schedules:
+            if not croniter.is_valid(schedule.cron):
+                raise ValueError(
+                    f"Schedule '{schedule.name}' cron '{schedule.cron}' "
+                    "is not a valid cron expression"
+                )
+
+            # The single Cloud Scheduler job fires on poll_window_cron; a schedule slot it
+            # does not cover would simply never be polled, so fail loudly at load time.
+            it = croniter(schedule.cron, _COVERAGE_WEEK_START)
+            fire = it.get_next(datetime)
+            while fire < _COVERAGE_WEEK_END:
+                if not croniter.match(self.poll_window_cron, fire):
+                    raise ValueError(
+                        f"poll_window_cron '{self.poll_window_cron}' does not cover "
+                        f"schedule '{schedule.name}' ('{schedule.cron}'): "
+                        f"no fire at {fire:%a %Y-%m-%d %H:%M}"
+                    )
+                fire = it.get_next(datetime)
 
         for route in self.routes:
             if not name_pattern.match(route.name):

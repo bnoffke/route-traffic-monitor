@@ -32,6 +32,13 @@ routes:
 
 timezone: America/Chicago
 
+# The single Cloud Scheduler job fires on this cron. A single cron cannot express the exact
+# union of the slots below (cron fields are a cross-product, and the weekday hours differ from
+# the weekend hours), so this is a deliberate superset: src/schedule.py skips any run that
+# matches no entry in `schedules`. load_config() fails if this stops covering a schedule.
+poll_window_cron: "*/10 6-9,12,15-19 * * *"
+
+# Real polling slots. Source of truth for the in-code gate and the schedule_name label.
 schedules:
   - name: am-peak
     cron: "*/10 6-9 * * 1-5"

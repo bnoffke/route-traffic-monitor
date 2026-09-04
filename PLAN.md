@@ -15,7 +15,7 @@ This replaces a prior R + GitHub Actions implementation (attached reference: `ge
 ## 2. High-level architecture
 
 ```
-Cloud Scheduler (N cron jobs, America/Chicago)
+Cloud Scheduler (1 cron job on the window cron, America/Chicago)
         │  authenticated POST to Cloud Run Admin API ("run job now")
         ▼
 Cloud Run Job  (Python 3.12, deployed from source via Buildpacks)
@@ -40,7 +40,7 @@ Alternatives considered:
 
 *GitHub Actions cron (status quo).* Rejected: cron schedules are UTC-only (DST drift on "peak hours"), start times are best-effort and routinely 5–30 min late, secrets live outside GCP IAM, and writing to GCS requires bootstrapping workload identity federation anyway. Once you need GCP credentials, you may as well run on GCP.
 
-**Scheduler: Cloud Scheduler.** Timezone-aware cron (`America/Chicago`), so peak windows survive DST transitions. Each schedule block in config materializes as one Scheduler job; all of them trigger the same Cloud Run Job via an authenticated POST to
+**Scheduler: Cloud Scheduler.** Timezone-aware cron (`America/Chicago`), so peak windows survive DST transitions. A **single** Scheduler job fires on `poll_window_cron`, a superset of the schedule blocks; the job itself matches the local time-of-day against those blocks and exits early when none is active (§6, `src/schedule.py`). One cron cannot express the exact union of the blocks — cron fields are a cross-product, and the weekday hours differ from the weekend hours — and Scheduler bills per job, so one job plus an in-process gate is cheaper than five jobs. It triggers the Cloud Run Job via an authenticated POST to
 `https://run.googleapis.com/v2/projects/{PROJECT}/locations/{REGION}/jobs/{JOB}:run`
 using OAuth (service account with `roles/run.invoker` on the job). This is the documented Scheduler→Jobs pattern.
 
@@ -87,10 +87,16 @@ routes:
     # intermediate: Some_Place      # supported, optional
   # ... one entry per directional segment (~16 total)
 
-# Schedules. These are *declared* here and *materialized* as Cloud Scheduler
-# jobs by Terraform (infra/ reads this file via yamldecode; see §11). Cron is
-# interpreted in `timezone`. Adding a check = add a block here, terraform apply.
 timezone: America/Chicago
+
+# The one Cloud Scheduler job Terraform materializes fires on this cron (infra/ reads this
+# file via yamldecode; see §11). Must be a superset of every block below; load_config()
+# refuses to start if it stops covering one.
+poll_window_cron: "*/10 6-9,12,15-19 * * *"
+
+# Real polling slots. Declared here, enforced in-process by src/schedule.py rather than by
+# Terraform, and used as the `schedule_name` label. Adding a check = add a block here, widen
+# poll_window_cron if needed, terraform apply.
 schedules:
   - name: am-peak
     cron: "*/10 6-9 * * 1-5"      # every 10 min, 6:00–9:50, weekdays (cheap at 2 routes; see §9)
@@ -184,7 +190,7 @@ gs://stmsn-bronze/route-traffic/madison/dt=2026-06-11/run_ts=2026-06-11T1230Z.pa
 
 Parsing `duration`/`staticDuration` to integer seconds at ingest is the one transformation permitted in bronze — it is lossless type coercion, not derivation. Delay = `duration - static_duration`, minutes, miles, day-of-week, weekend flags, and local-time columns are all dbt's job.
 
-`schedule_name`: Scheduler jobs can pass `--update-env-vars` style overrides via the Jobs run API (`overrides.containerOverrides[].env`). Have each Scheduler job pass `SCHEDULE_NAME=am-peak` etc. Nice for downstream analysis ("baseline" vs "peak" samples); if the override plumbing is annoying, make it nullable and ship without it.
+`schedule_name`: derived in-process. `src/schedule.py:active_schedule` matches the run's local time-of-day against the `schedules` blocks and returns the one that fired; `main()` writes its name onto every row. This avoids the Jobs run API `overrides.containerOverrides[].env` route, which needs the extra `run.jobs.runWithOverrides` permission (tried and reverted in 2dc3460). Setting `SCHEDULE_NAME` in the environment overrides the match and bypasses the gate, which is how a manual off-slot `gcloud run jobs execute` still polls.
 
 ## 7. Secrets and IAM
 
@@ -228,7 +234,7 @@ route-traffic/
 │   ├── routes_client.py     # computeRoutes call, retries, response → records
 │   └── sink.py              # records → parquet (pyarrow) → GCS
 ├── infra/
-│   ├── main.tf              # services, SAs, IAM, secret container, scheduler jobs
+│   ├── main.tf              # services, SAs, IAM, secret container, scheduler job
 │   ├── variables.tf
 │   └── versions.tf
 ├── scripts/
@@ -258,7 +264,7 @@ Keep `main.py` a thin wrapper so the compute substrate can change (Jobs → Func
 
 Preconditions to confirm (not provide): billing is linked to the project (required by the Routes API and Cloud Build), and the maintainer is authenticated locally (`gcloud auth login` and `gcloud auth application-default login` for Terraform).
 
-Explicitly **not** pre-created: service accounts, the secret container, scheduler jobs, API enablement — all Terraform resources. SA emails are derived from names (`route-traffic-runner@<project_id>.iam.gserviceaccount.com`); do not ask the maintainer for them.
+Explicitly **not** pre-created: service accounts, the secret container, the scheduler job, API enablement — all Terraform resources. SA emails are derived from names (`route-traffic-runner@<project_id>.iam.gserviceaccount.com`); do not ask the maintainer for them.
 
 ### Split of responsibilities — Terraform owns everything around the job; gcloud owns the job:
 
@@ -276,9 +282,8 @@ locals {
 }
 
 resource "google_cloud_scheduler_job" "poll" {
-  for_each  = { for s in local.cfg.schedules : s.name => s }
-  name      = "route-traffic--${each.key}"
-  schedule  = each.value.cron
+  name      = "route-traffic"
+  schedule  = local.cfg.poll_window_cron
   time_zone = local.cfg.timezone
   http_target {
     http_method = "POST"
@@ -286,7 +291,7 @@ resource "google_cloud_scheduler_job" "poll" {
     oauth_token {
       service_account_email = google_service_account.scheduler.email
     }
-    # optional: body with overrides.containerOverrides[].env to pass SCHEDULE_NAME
+    # No overrides body: that needs run.jobs.runWithOverrides. The job labels itself.
   }
 }
 ```

@@ -80,19 +80,23 @@ resource "google_secret_manager_secret" "routes_api_key" {
 }
 
 # ---------------------------------------------------------------------------
-# Cloud Scheduler jobs — one per schedule block in routes.yaml
+# Cloud Scheduler — a single job on the superset window cron from routes.yaml.
+#
+# One cron cannot express the exact union of the schedule blocks (weekday hours differ from
+# weekend hours), so this fires on a superset and src/schedule.py exits early on any run that
+# matches no schedule block. That keeps us to one billable scheduler job while polling exactly
+# the same times as the five jobs this replaced.
 # ---------------------------------------------------------------------------
 resource "google_cloud_scheduler_job" "poll" {
-  for_each = { for s in local.cfg.schedules : s.name => s }
-
-  name      = "route-traffic--${each.key}"
-  schedule  = each.value.cron
+  name      = "route-traffic"
+  schedule  = local.cfg.poll_window_cron
   time_zone = local.cfg.timezone
   region    = var.region
 
   # Plain :run (no overrides body). An overrides body would require the extra
-  # run.jobs.runWithOverrides permission; we keep the SA on plain roles/run.invoker
-  # and derive the schedule label downstream from the run's local time-of-day.
+  # run.jobs.runWithOverrides permission; we keep the SA on plain roles/run.invoker, and the
+  # job derives its own schedule label in-process by matching the local time-of-day against
+  # the schedule blocks in routes.yaml.
   http_target {
     http_method = "POST"
     uri         = "https://run.googleapis.com/v2/projects/${var.project}/locations/${var.region}/jobs/route-traffic:run"
